@@ -45,6 +45,8 @@ To build and run the Docker container for executing all baseline experiments on 
    docker run --rm --env-file .env -v $(pwd):/app rare-challenge bash run_baselines.sh
    ```
     This command mounts the current directory to the `/app` directory in the container and runs the `run_baselines.sh` script. Please use the .env file to set the environment variables for the container (e.g. dataset path).
-## Questions 
+## Questions  
+
 For any questions or contributions, feel free to open an issue or contact us via [e-mail](mailto:rare-challenge@tue.nl).
+
 ---
