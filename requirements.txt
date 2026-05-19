@@ -1,3 +1,5 @@
+# CUDA 12.8 PyTorch wheels for GPU support; requires a compatible NVIDIA driver.
+--extra-index-url https://download.pytorch.org/whl/cu128
 torch>=2.1
 torchvision
 timm
