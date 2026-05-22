@@ -1,6 +1,6 @@
 /output
 
-.env
+env/
 
 *.pth
 *.pt
