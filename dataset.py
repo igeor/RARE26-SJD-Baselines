@@ -1,4 +1,9 @@
+import os
+from io import BytesIO
 from pathlib import Path
+from typing import List, Optional, Tuple
+import zipfile
+import warnings
 
 from PIL import Image
 from torchvision import transforms
@@ -114,3 +119,80 @@ class RareTestSet(Dataset):
             return image, label, str(img_path)
         else:
             return image, label
+
+
+class GastroNetZipDataset(Dataset):
+    """Recursively reads loose images and images inside zip files."""
+
+    IMG_EXTENSIONS = (".png", ".jpg", ".jpeg")
+
+    def __init__(self, root: str, transform, max_images: Optional[int] = None, skip_bad_images: bool = True):
+        self.root = Path(root)
+        self.transform = transform
+        self.items: List[Tuple[str, str, Optional[str]]] = []
+        self.skip_bad_images = skip_bad_images
+        self._warned_bad_items = set()
+
+        if not self.root.exists():
+            raise FileNotFoundError(f"Data root does not exist: {self.root}")
+
+        self._index_files()
+
+        if max_images is not None and max_images > 0:
+            self.items = self.items[:max_images]
+
+        if not self.items:
+            raise RuntimeError(f"No images found under: {self.root}")
+
+    def _index_files(self) -> None:
+        for dp, _, files in os.walk(self.root):
+            for f in files:
+                p = os.path.join(dp, f)
+                lower = f.lower()
+
+                if lower.endswith(".zip"):
+                    try:
+                        with zipfile.ZipFile(p) as z:
+                            for n in z.namelist():
+                                if n.lower().endswith(self.IMG_EXTENSIONS):
+                                    self.items.append(("zip", p, n))
+                    except zipfile.BadZipFile:
+                        print(f"Skipping bad zip file: {p}")
+                elif lower.endswith(self.IMG_EXTENSIONS):
+                    self.items.append(("file", p, None))
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def _load(self, item: Tuple[str, str, Optional[str]]) -> Image.Image:
+        typ, path, name = item
+        if typ == "zip":
+            assert name is not None
+            with zipfile.ZipFile(path) as z:
+                return Image.open(BytesIO(z.read(name))).convert("RGB")
+        return Image.open(path).convert("RGB")
+
+    @staticmethod
+    def _describe_item(item: Tuple[str, str, Optional[str]]) -> str:
+        typ, path, name = item
+        if typ == "zip":
+            return f"{path}!{name}"
+        return path
+
+    def __getitem__(self, idx: int):
+        for offset in range(len(self.items)):
+            item_idx = (idx + offset) % len(self.items)
+            item = self.items[item_idx]
+            try:
+                img = self._load(item)
+                return self.transform(img)
+            except (OSError, EOFError, KeyError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+                if not self.skip_bad_images:
+                    raise
+                item_key = self._describe_item(item)
+                if item_key not in self._warned_bad_items:
+                    warnings.warn(f"Skipping unreadable image: {item_key} ({exc})")
+                    self._warned_bad_items.add(item_key)
+
+        raise RuntimeError(f"All {len(self.items)} indexed images failed to load under: {self.root}")
+
