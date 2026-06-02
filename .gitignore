@@ -2,6 +2,9 @@
 
 env/
 
+__pycache__/
+*.pyc
+
 *.pth
 *.pt
 data/
