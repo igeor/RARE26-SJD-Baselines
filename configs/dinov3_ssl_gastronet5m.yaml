@@ -1,0 +1,43 @@
+data: D:\Data\RARE26\pretrain\data
+model: vit_large_patch16_dinov3.lvd1689m
+image_size: 256
+
+epochs: 5
+batch_size: 8
+accum_steps: 16
+lr: 0.0001
+weight_decay: 0.04
+grad_clip: 3.0
+workers: 8
+seed: 42
+max_images:
+
+val_data: data/train
+val_every_steps: 2000
+k_folds: 5
+probe_lr: 0.001
+probe_weight_decay: 0.0
+probe_batch_size: 256
+
+out_dim: 16384
+student_temp: 0.1
+teacher_temp: 0.04
+teacher_temp_warmup: 0.04
+teacher_temp_warmup_epochs: 0
+center_momentum: 0.9
+ema_base: 0.996
+
+local_crops_number: 4
+global_crop_scale: [0.50, 1.0]
+local_crop_scale: [0.12, 0.50]
+strong_color_jitter: false
+
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target:
+  - qkv
+
+amp: true
+save_dir: ./output/dinov3_gastronet5m
+save_every: 1
