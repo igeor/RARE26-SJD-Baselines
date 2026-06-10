@@ -106,10 +106,7 @@ def main(args):
         fold_dir = output_dir / f"fold_{fold_idx}"
         fold_dir.mkdir(parents=True, exist_ok=True)
 
-        # fold_log_file = fold_dir / "training_log.csv"
-        fold_model_path = fold_dir / "best_model.pth"
-
-        # write_log_header(fold_log_file)
+        fold_model_path = fold_dir / ("best_model.pth" if args.early_stopping["enabled"] else "last_model.pth")
 
         train_loader, val_loader = create_dataloaders(
             train_dataset,
@@ -150,7 +147,8 @@ def main(args):
         best_metric = float("inf") if val_metric_name == "Loss" else float("-inf")
         best_epoch = None
         best_val_metrics = None
-
+        patience = args.early_stopping.get("patience", 10)
+        epochs_without_improvement = 0
 
         for epoch in range(1, args.epochs + 1):
             print(f"\nFold {fold_idx} | Epoch {epoch}/{args.epochs}")
@@ -168,7 +166,7 @@ def main(args):
                 val_loader,
                 criterion,
                 device,
-                n_bootstrap=args.validate["n_bootstrap"],
+                n_bootstrap=args.metrics["n_bootstrap"],
                 seed=args.seed + fold_idx,
                 return_predictions=True,
             )
@@ -190,24 +188,25 @@ def main(args):
                 fold_dir / f"epoch_{epoch}_val_predictions.npz",
             )
 
+            if val_metric_name == "Loss":
+                current_metric = val_metrics["Loss"]
+            else:
+                current_metric = val_metrics["base_metrics"][val_metric_name]
 
-            current_metric = val_metrics["base_metrics"][val_metric_name]
-
-            if metric_improved(val_metric_name, current_metric, best_metric):
+            should_save_model = (
+                metric_improved(val_metric_name, current_metric, best_metric)
+                if args.early_stopping["enabled"]
+                else True
+            )
+            
+            if should_save_model:
                 best_epoch = epoch
                 best_metric = current_metric
                 best_val_metrics = val_metrics
+                epochs_without_improvement = 0
 
-                save_metrics_json(
-                    best_val_metrics,
-                    fold_dir / "best_val_metrics.json",
-                )
-
-                save_predictions_npz(
-                    y_val_true,
-                    y_val_scores,
-                    fold_dir / "best_val_predictions.npz",
-                )
+                save_metrics_json(best_val_metrics, fold_dir / "best_val_metrics.json" if args.early_stopping["enabled"] else fold_dir / "last_val_metrics.json")
+                save_predictions_npz(y_val_true, y_val_scores, fold_dir / "best_val_predictions.npz" if args.early_stopping["enabled"] else fold_dir / "last_val_predictions.npz")
 
                 torch.save(
                     {
@@ -217,15 +216,14 @@ def main(args):
                         "optimizer_state_dict": optimizer.state_dict(),
                         "best_metric": best_metric,
                         "val_metric_name": val_metric_name,
+                        "is_best_model": args.early_stopping["enabled"],
                         "args": vars(args),
                     },
                     fold_model_path,
                 )
 
-                print(
-                    f"Saved best model for fold {fold_idx} "
-                    f"at epoch {epoch} with {val_metric_name}={best_metric:.4f}"
-                )
+            else:
+                epochs_without_improvement += 1
 
             print(
                 f"Fold {fold_idx} | Epoch {epoch}/{args.epochs} | "
@@ -235,6 +233,10 @@ def main(args):
                 f"PPV@90% Recall (bootstrap v1): {val_metrics['bootstrap_metrics']['PPV@90% Recall']['ci_lower']:.3f} | "
                 f"PPV@90% Recall (bootstrap v2): {val_metrics['bootstrap_metrics_v2']['PPV@90RECALL 95% CI Lower Bound']:.3f} | "
             )
+
+            if args.early_stopping["enabled"] and epochs_without_improvement >= patience:
+                print(f"Early stopping at epoch {epoch}. Best epoch: {best_epoch}")
+                break
 
         base = best_val_metrics["base_metrics"]
         boot = best_val_metrics["bootstrap_metrics"]
