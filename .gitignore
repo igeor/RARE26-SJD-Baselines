@@ -12,3 +12,4 @@ outputs/
 resources/
 wandb/
 logs/
+configs/sanity_check/*.yaml
