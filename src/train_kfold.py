@@ -300,7 +300,7 @@ def main(args):
     # Evaluate the trained model by invoking the evaluation script directly
     subprocess.run(
         [
-            "python",
+            sys.executable,
             "scripts/evaluate_fullset.py",
             "--predictions_dir", str(output_dir),
         ]
