@@ -1,8 +1,12 @@
 import torch
+import csv
 from torch import nn
 from pathlib import Path
 import pandas as pd
 from dataclasses import asdict
+import json
+import numpy as np
+
 
 def save_checkpoint(
     save_dir: Path,
@@ -68,3 +72,67 @@ def save_val_metrics(save_dir: Path, val_metrics: dict, global_step: int) -> Non
     tmp_csv_path.replace(csv_path)
 
     print(f"---Saved validation metrics CSV: {csv_path}")
+
+
+
+def to_serializable(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {k: to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [to_serializable(v) for v in obj]
+    return obj
+
+
+def save_metrics_json(metrics, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(to_serializable(metrics), f, indent=2)
+
+
+def save_predictions_npz(y_true, y_scores, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    np.savez_compressed(
+        path,
+        y_true=np.asarray(y_true).reshape(-1),
+        y_scores=np.asarray(y_scores).reshape(-1),
+    )
+
+
+def flatten_metrics(metrics):
+    flat = {}
+
+    for key, value in metrics.items():
+        if isinstance(value, dict):
+            for subkey, subvalue in flatten_metrics(value).items():
+                flat[f"{key}.{subkey}"] = subvalue
+        else:
+            flat[key] = value
+
+    return flat
+
+
+def save_summary_csv(rows, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    flat_rows = [flatten_metrics(row) for row in rows]
+    fieldnames = sorted({key for row in flat_rows for key in row.keys()})
+
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(flat_rows)
+
+
+def save_config(args, output_dir):
+    with open(output_dir / "config.txt", "w") as f:
+        for k, v in vars(args).items():
+            f.write(f"{k}: {v}\n")
