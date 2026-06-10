@@ -7,7 +7,7 @@ import warnings
 
 from PIL import Image
 from torchvision import transforms
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 
 
 class RareDataset(Dataset):
@@ -196,3 +196,16 @@ class GastroNetZipDataset(Dataset):
 
         raise RuntimeError(f"All {len(self.items)} indexed images failed to load under: {self.root}")
 
+
+def get_class_counts(dataset):
+    counts = {"neoplasia": 0, "nondysplastic": 0}
+
+    if isinstance(dataset, Subset):
+        samples = [dataset.dataset.samples[i] for i in dataset.indices]
+    else:
+        samples = dataset.samples
+
+    for _, label in samples:
+        counts[label] += 1
+
+    return counts

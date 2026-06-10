@@ -1,8 +1,10 @@
+import os
+
 import torch
 import timm
 import math
 from torch import nn
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
 
@@ -129,3 +131,90 @@ class ClassificationHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(x)
+
+
+def get_classification_head(
+        in_dim: int, 
+        hidden_dims: List[int], 
+        num_classes: int = 1,
+        hidden_activation: str = "relu",   # Fix: Use non-linearities for hidden layers
+        norm: Optional[str] = None,        # Options: "batch", "layer", None
+        dropout: float = 0.1
+) -> nn.Module:
+    
+    # If no hidden layers, return your original class directly
+    if not hidden_dims: 
+        return ClassificationHead(in_dim, num_classes)
+    
+    # 1. Define hidden activation factory
+    if hidden_activation == "relu": act_fn = nn.ReLU
+    elif hidden_activation == "gelu": act_fn = nn.GELU
+    else: act_fn = nn.Identity
+
+    # 2. Define normalization factory
+    if norm == "batch": norm_fn = nn.BatchNorm1d
+    elif norm == "layer": norm_fn = nn.LayerNorm
+    else: norm_fn = None
+        
+    # 3. Build the intermediate hidden MLP structure
+    layers = []
+    current_dim = in_dim
+    for hidden_dim in hidden_dims:
+        layers.append(nn.Linear(current_dim, hidden_dim))
+        if norm_fn is not None:
+            layers.append(norm_fn(hidden_dim))
+        layers.append(act_fn())
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        current_dim = hidden_dim
+
+    # 4. Initialize your original class using the last hidden dimension
+    final_head = ClassificationHead(current_dim, num_classes)
+    layers.append(final_head)
+    
+    # Wrap the entire pipeline cleanly into a single module
+    return nn.Sequential(*layers)
+
+
+def build_model(args, device):
+    model = timm.create_model(
+        args.model,
+        pretrained=True,
+        num_classes=1,
+    )
+
+    model = model.to(device)
+
+    if args.pretrained:
+        print(f"Using pretrained weights from: {args.pretrained}")
+        pretrained_path = os.path.join(os.getcwd(), args.pretrained)
+
+        if os.path.exists(pretrained_path):
+            state_dict = torch.load(pretrained_path, map_location=device)
+
+            if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
+                state_dict = state_dict["model_state_dict"]
+
+            msg = model.load_state_dict(state_dict, strict=False)
+            print(msg)
+        else:
+            raise FileNotFoundError(f"Pretrained checkpoint not found: {pretrained_path}")
+
+    head = get_classification_head(
+        in_dim=model.num_features,
+        hidden_dims=args.head["hidden_dims"],
+        hidden_activation=args.head["activation"],
+        norm=args.head["norm"],
+        dropout=args.head["dropout"],
+    )
+
+    model.fc = head
+    model = model.to(device)
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    for param in model.fc.parameters():
+        param.requires_grad = True
+
+    return model
