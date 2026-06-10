@@ -1,0 +1,34 @@
+data_path: "data"
+output_path: "output"
+experiment_name: "sanity_check"
+
+model: "resnet50" # Options: "resnet50", "vit_b16", "vit_l16"
+pretrained: "resources/pretrained/RN50_Billion-Scale-SWSL+GastroNet-5M_DINOv1.pth"
+freeze_backbone: true
+
+head: 
+  hidden_dims: [64]
+  activation: "relu"
+  norm: null # Options: "batch", "layer", "none"
+  dropout: 0.1
+
+image_size: 224
+batch_size: 64
+epochs: 10
+lr: 0.001
+
+validate:
+  n_bootstrap: 3
+
+early_stopping:
+  enabled: false
+  patience: null # Not implemented yet
+  metric: "PPV@90% Recall" 
+
+k: 5 # Number of folds for K-Fold Cross-Validation
+sampling: "none" # Options: "none", "oversample", "undersample"
+
+log_file: "sanity_check_log.csv"
+save_model: "sanity_check_model.pth"
+num_workers: 0
+seed: 42
