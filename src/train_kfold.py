@@ -61,13 +61,51 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
     return total_loss / len(dataloader), correct / total
 
 
+def save_full_predictions_npz(output_dir, epoch):
+    """Combine validation predictions from all folds for one epoch."""
+    output_dir = Path(output_dir)
 
-def metric_improved(val_metric_name, current_metric, best_metric):
-    if val_metric_name == "Loss":
-        return current_metric < best_metric
-    return current_metric > best_metric
+    prediction_files = sorted(
+        output_dir.glob(f"fold_*/epoch_{epoch}_val_predictions.npz")
+    )
 
+    if not prediction_files:
+        print(f"No prediction files found for epoch {epoch}")
+        return None
 
+    all_y_true = []
+    all_y_scores = []
+    fold_ids = []
+
+    for path in prediction_files:
+        data = np.load(path)
+
+        all_y_true.append(data["y_true"])
+        all_y_scores.append(data["y_scores"])
+
+        fold_name = path.parent.name  # e.g. fold_1
+        fold_idx = int(fold_name.split("_")[1])
+        fold_ids.append(
+            np.full(shape=data["y_true"].shape, fill_value=fold_idx)
+        )
+
+    y_true = np.concatenate(all_y_true)
+    y_scores = np.concatenate(all_y_scores)
+    folds = np.concatenate(fold_ids)
+
+    save_path = output_dir / f"epoch_{epoch}_full_predictions.npz"
+
+    np.savez_compressed(
+        save_path,
+        y_true=y_true,
+        y_scores=y_scores,
+        folds=folds,
+    )
+
+    print(f"Saved combined predictions to: {save_path}")
+    return save_path
+
+    
 def main(args):
     seed_everything(args.seed)
 
@@ -89,8 +127,6 @@ def main(args):
     train_transform = TrainRare26Transform(image_size=args.image_size)
     val_transform = ValidationRare26Transform(image_size=args.image_size)
 
-    all_fold_results = []
-
     for fold_idx, (train_subset, val_subset) in enumerate(folds, start=1):
         print(f"\n=== Fold {fold_idx}/{args.k} ===")
 
@@ -105,8 +141,6 @@ def main(args):
 
         fold_dir = output_dir / f"fold_{fold_idx}"
         fold_dir.mkdir(parents=True, exist_ok=True)
-
-        fold_model_path = fold_dir / ("best_model.pth" if args.early_stopping["enabled"] else "last_model.pth")
 
         train_loader, val_loader = create_dataloaders(
             train_dataset,
@@ -139,17 +173,6 @@ def main(args):
             lr=args.lr,
         )
 
-        val_metric_name = "PPV@90% Recall"
-        if args.early_stopping["enabled"]:
-            val_metric_name = args.early_stopping["metric"]
-            
-
-        best_metric = float("inf") if val_metric_name == "Loss" else float("-inf")
-        best_epoch = None
-        best_val_metrics = None
-        patience = args.early_stopping.get("patience", 10)
-        epochs_without_improvement = 0
-
         for epoch in range(1, args.epochs + 1):
             print(f"\nFold {fold_idx} | Epoch {epoch}/{args.epochs}")
 
@@ -161,141 +184,75 @@ def main(args):
                 device,
             )
 
-            val_metrics, y_val_true, y_val_scores = evaluate(
-                model,
-                val_loader,
-                criterion,
-                device,
-                n_bootstrap=args.metrics["n_bootstrap"],
-                seed=args.seed + fold_idx,
-                return_predictions=True,
-            )
 
-            # {'Loss': 0.11858299374580383, 'Accuracy': 0.9741518578352181, 
-            # 'base_metrics': {'AUROC': 0.9422913117546848, 'AUPRC': 0.7517970258860072, 'PPV@90% Recall': np.float64(0.19333333333333333), 'Accuracy': np.float64(0.9741518578352181), 'Sensitivity': np.float64(0.5), 'Specificity': np.float64(1.0)}, 
-            # 'bootstrap_metrics': {'AUROC': {'median': 0.94423976, 'ci_lower': 0.9441232235, 'ci_upper': 0.9455229915000001}, 'AUPRC': {'median': 0.6542209737297922, 'ci_lower': 0.6326753675180588, 'ci_upper': 0.6547025779143271}, 'PPV@90% Recall': {'median': 0.04229677539435112, 'ci_lower': 0.04193101524030579, 'ci_upper': 0.042384758072194134}, '' 'Accuracy': {'median': 0.9952574257425743, 'ci_lower': 0.9950128712871287, 'ci_upper': 0.9953420792079208}, 'Sensitivity': {'median': 0.521, 'ci_lower': 0.4963, 'ci_upper': 0.5295500000000001}, 'Specificity': {'median': 1.0, 'ci_lower': 1.0, 'ci_upper': 1.0}}, 
-            # 'bootstrap_metrics_v2': {'Score': np.float64(0.10830429732868757), 'PPV@90RECALL': np.float64(0.10830429732868757), 'PPV@90RECALL 95% CI Lower Bound': np.float64(0.03946442121564073), 'PPV@90RECALL 95% CI Upper Bound': np.float64(0.5737187862950057), 'AUROC': np.float64(0.9873935264054515), 'AUROC 95% CI Lower Bound': np.float64(0.9592333901192504), 'AUROC 95% CI Upper Bound': np.float64(0.997427597955707), 'AUPRC': np.float64(0.8238095238095239), 'AUPRC 95% CI Lower Bound': np.float64(0.7273015873015873), 'AUPRC 95% CI Upper Bound': np.float64(0.8385119047619047), 'AUROC Full Dataset': 0.9422913117546848, 'AUPRC Full Dataset': 0.7517970258860072, 'PPV@90RECALL Full Dataset': np.float64(0.19225055928411633)}
-            # }
+            if (args.save_every > 0 and epoch % args.save_every == 0) or epoch == args.epochs:
+                val_metrics, y_val_true, y_val_scores = evaluate(
+                    model,
+                    val_loader,
+                    criterion,
+                    device,
+                    n_bootstrap=args.metrics["n_bootstrap"],
+                    seed=args.seed + fold_idx,
+                    return_predictions=True,
+                )
 
-            save_metrics_json(
-                val_metrics,
-                fold_dir / f"epoch_{epoch}_val_metrics.json",
-            )
+                # val_metrics example structure:
+                # {'Loss': 0.11858299374580383, 'Accuracy': 0.9741518578352181, 
+                # 'base_metrics': {'AUROC': 0.9422913117546848, 'AUPRC': 0.7517970258860072, 'PPV@90% Recall': np.float64(0.19333333333333333), 'Accuracy': np.float64(0.9741518578352181), 'Sensitivity': np.float64(0.5), 'Specificity': np.float64(1.0)}, 
+                # 'bootstrap_metrics': {'AUROC': {'median': 0.94423976, 'ci_lower': 0.9441232235, 'ci_upper': 0.9455229915000001}, 'AUPRC': {'median': 0.6542209737297922, 'ci_lower': 0.6326753675180588, 'ci_upper': 0.6547025779143271}, 'PPV@90% Recall': {'median': 0.04229677539435112, 'ci_lower': 0.04193101524030579, 'ci_upper': 0.042384758072194134}, '' 'Accuracy': {'median': 0.9952574257425743, 'ci_lower': 0.9950128712871287, 'ci_upper': 0.9953420792079208}, 'Sensitivity': {'median': 0.521, 'ci_lower': 0.4963, 'ci_upper': 0.5295500000000001}, 'Specificity': {'median': 1.0, 'ci_lower': 1.0, 'ci_upper': 1.0}}, 
+                # 'bootstrap_metrics_v2': {'Score': np.float64(0.10830429732868757), 'PPV@90RECALL': np.float64(0.10830429732868757), 'PPV@90RECALL 95% CI Lower Bound': np.float64(0.03946442121564073), 'PPV@90RECALL 95% CI Upper Bound': np.float64(0.5737187862950057), 'AUROC': np.float64(0.9873935264054515), 'AUROC 95% CI Lower Bound': np.float64(0.9592333901192504), 'AUROC 95% CI Upper Bound': np.float64(0.997427597955707), 'AUPRC': np.float64(0.8238095238095239), 'AUPRC 95% CI Lower Bound': np.float64(0.7273015873015873), 'AUPRC 95% CI Upper Bound': np.float64(0.8385119047619047), 'AUROC Full Dataset': 0.9422913117546848, 'AUPRC Full Dataset': 0.7517970258860072, 'PPV@90RECALL Full Dataset': np.float64(0.19225055928411633)}
+                # }
 
-            save_predictions_npz(
-                y_val_true,
-                y_val_scores,
-                fold_dir / f"epoch_{epoch}_val_predictions.npz",
-            )
+                save_metrics_json(
+                    val_metrics,
+                    fold_dir / f"epoch_{epoch}_val_metrics.json",
+                )
 
-            if val_metric_name == "Loss":
-                current_metric = val_metrics["Loss"]
-            else:
-                current_metric = val_metrics["base_metrics"][val_metric_name]
 
-            should_save_model = (
-                metric_improved(val_metric_name, current_metric, best_metric)
-                if args.early_stopping["enabled"]
-                else True
-            )
-            
-            if should_save_model:
-                best_epoch = epoch
-                best_metric = current_metric
-                best_val_metrics = val_metrics
-                epochs_without_improvement = 0
-
-                save_metrics_json(best_val_metrics, fold_dir / "best_val_metrics.json" if args.early_stopping["enabled"] else fold_dir / "last_val_metrics.json")
-                save_predictions_npz(y_val_true, y_val_scores, fold_dir / "best_val_predictions.npz" if args.early_stopping["enabled"] else fold_dir / "last_val_predictions.npz")
-
+                save_predictions_npz(
+                    y_val_true,
+                    y_val_scores,
+                    fold_dir / f"epoch_{epoch}_val_predictions.npz",
+                )
+                
                 torch.save(
                     {
                         "fold": fold_idx,
                         "epoch": epoch,
                         "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
-                        "best_metric": best_metric,
-                        "val_metric_name": val_metric_name,
-                        "is_best_model": args.early_stopping["enabled"],
                         "args": vars(args),
                     },
-                    fold_model_path,
+                    fold_dir / f"checkpoint_epoch_{epoch}.pth",
+                )
+
+                print(
+                    f"Fold {fold_idx} | Epoch {epoch}/{args.epochs} | "
+                    f"Train Loss: {train_loss:.3f} | "
+                    f"Train Acc: {train_acc:.3f} | "
+                    f"PPV@90% Recall (base): {val_metrics['base_metrics']['PPV@90% Recall']:.3f} | "
+                    f"PPV@90% Recall (bootstrap v1): {val_metrics['bootstrap_metrics']['PPV@90% Recall']['ci_lower']:.3f} | "
+                    f"PPV@90% Recall (bootstrap v2): {val_metrics['bootstrap_metrics_v2']['PPV@90RECALL 95% CI Lower Bound']:.3f} | "
                 )
 
             else:
-                epochs_without_improvement += 1
+                print(
+                    f"Fold {fold_idx} | Epoch {epoch}/{args.epochs} | "
+                    f"Train Loss: {train_loss:.3f} | "
+                    f"Train Acc: {train_acc:.3f}"
+                )
+       
+    if args.save_every > 0:
+        saved_full_prediction_files = []
+        for epoch in range(args.save_every, args.epochs + 1, args.save_every):
+            save_path = save_full_predictions_npz(output_dir, epoch)
+            if save_path is not None:
+                saved_full_prediction_files.append(save_path)
 
-            print(
-                f"Fold {fold_idx} | Epoch {epoch}/{args.epochs} | "
-                f"Train Loss: {train_loss:.3f} | "
-                f"Train Acc: {train_acc:.3f} | "
-                f"PPV@90% Recall (base): {val_metrics['base_metrics']['PPV@90% Recall']:.3f} | "
-                f"PPV@90% Recall (bootstrap v1): {val_metrics['bootstrap_metrics']['PPV@90% Recall']['ci_lower']:.3f} | "
-                f"PPV@90% Recall (bootstrap v2): {val_metrics['bootstrap_metrics_v2']['PPV@90RECALL 95% CI Lower Bound']:.3f} | "
-            )
-
-            if args.early_stopping["enabled"] and epochs_without_improvement >= patience:
-                print(f"Early stopping at epoch {epoch}. Best epoch: {best_epoch}")
-                break
-
-        base = best_val_metrics["base_metrics"]
-        boot = best_val_metrics["bootstrap_metrics"]
-        boot_v2 = best_val_metrics["bootstrap_metrics_v2"]
-
-        all_fold_results.append(
-            {
-                "fold": fold_idx,
-                "best_epoch": best_epoch,
-                "best_val_metric_name": val_metric_name,
-                "best_metric": best_metric,
-
-                "Loss": best_val_metrics["Loss"],
-
-                "base_AUROC": base["AUROC"],
-                "base_AUPRC": base["AUPRC"],
-                "base_PPV@90% Recall": base["PPV@90% Recall"],
-                "base_Accuracy": base["Accuracy"],
-                "base_Sensitivity": base["Sensitivity"],
-                "base_Specificity": base["Specificity"],
-
-                "bootstrap_AUROC_median": boot["AUROC"]["median"],
-                "bootstrap_AUROC_ci_lower": boot["AUROC"]["ci_lower"],
-                "bootstrap_AUROC_ci_upper": boot["AUROC"]["ci_upper"],
-
-                "bootstrap_AUPRC_median": boot["AUPRC"]["median"],
-                "bootstrap_AUPRC_ci_lower": boot["AUPRC"]["ci_lower"],
-                "bootstrap_AUPRC_ci_upper": boot["AUPRC"]["ci_upper"],
-
-                "bootstrap_PPV@90% Recall_median": boot["PPV@90% Recall"]["median"],
-                "bootstrap_PPV@90% Recall_ci_lower": boot["PPV@90% Recall"]["ci_lower"],
-                "bootstrap_PPV@90% Recall_ci_upper": boot["PPV@90% Recall"]["ci_upper"],
-
-                "bootstrap_v2_AUROC": boot_v2["AUROC"],
-                "bootstrap_v2_AUROC_ci_lower": boot_v2["AUROC 95% CI Lower Bound"],
-                "bootstrap_v2_AUROC_ci_upper": boot_v2["AUROC 95% CI Upper Bound"],
-
-                "bootstrap_v2_AUPRC": boot_v2["AUPRC"],
-                "bootstrap_v2_AUPRC_ci_lower": boot_v2["AUPRC 95% CI Lower Bound"],
-                "bootstrap_v2_AUPRC_ci_upper": boot_v2["AUPRC 95% CI Upper Bound"],
-
-                "bootstrap_v2_PPV@90RECALL": boot_v2["PPV@90RECALL"],
-                "bootstrap_v2_PPV@90RECALL_ci_lower": boot_v2["PPV@90RECALL 95% CI Lower Bound"],
-                "bootstrap_v2_PPV@90RECALL_ci_upper": boot_v2["PPV@90RECALL 95% CI Upper Bound"],
-
-                "full_AUROC": boot_v2["AUROC Full Dataset"],
-                "full_AUPRC": boot_v2["AUPRC Full Dataset"],
-                "full_PPV@90RECALL": boot_v2["PPV@90RECALL Full Dataset"],
-            }
+        print(
+            f"Exported {len(saved_full_prediction_files)} combined full-prediction "
+            f"file(s) for save_every={args.save_every}."
         )
-
-    all_results_path = output_dir / "all_folds_results.csv"
-    with open(all_results_path, "w", newline="", encoding="utf-8") as csvfile:
-        fieldnames = list(all_fold_results[0].keys())
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in all_fold_results:
-            writer.writerow(row)
-    print(f"\nSaved all fold results to {all_results_path}")
 
     # Evaluate the trained model by invoking the evaluation script directly
     subprocess.run(
@@ -303,6 +260,7 @@ def main(args):
             sys.executable,
             "scripts/evaluate_fullset.py",
             "--predictions_dir", str(output_dir),
+            "--epoch", str(args.epochs),  # Evaluate the final epoch's predictions
         ]
     )
 
