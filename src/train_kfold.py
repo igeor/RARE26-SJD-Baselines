@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import torch
 import numpy as np
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import Subset
 from tqdm import tqdm
 
@@ -24,6 +23,7 @@ from utils.dataloader import create_dataloaders
 from utils.seed import seed_everything
 from utils.io import save_config, save_metrics_json, save_predictions_npz
 from models import build_model
+from optimizer import build_optimizer
 from evaluate_kfold import evaluate
 from transforms import TrainRare26Transform, ValidationRare26Transform
 
@@ -105,9 +105,23 @@ def save_full_predictions_npz(output_dir, epoch):
     print(f"Saved combined predictions to: {save_path}")
     return save_path
 
+
+def get_n_bootstrap(args):
+    metrics = getattr(args, "metrics", None)
+    if metrics is not None:
+        return metrics.get("n_bootstrap", 1000)
+
+    validate = getattr(args, "validate", None)
+    if validate is not None:
+        return validate.get("n_bootstrap", 1000)
+
+    return 1000
+
     
 def main(args):
     seed_everything(args.seed)
+    save_every = getattr(args, "save_every", args.epochs)
+    n_bootstrap = get_n_bootstrap(args)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -168,10 +182,7 @@ def main(args):
 
         criterion = nn.BCEWithLogitsLoss()
 
-        optimizer = optim.Adam(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=args.lr,
-        )
+        optimizer = build_optimizer(model, args)
 
         for epoch in range(1, args.epochs + 1):
             print(f"\nFold {fold_idx} | Epoch {epoch}/{args.epochs}")
@@ -185,13 +196,13 @@ def main(args):
             )
 
 
-            if (args.save_every > 0 and epoch % args.save_every == 0) or epoch == args.epochs:
+            if (save_every > 0 and epoch % save_every == 0) or epoch == args.epochs:
                 val_metrics, y_val_true, y_val_scores = evaluate(
                     model,
                     val_loader,
                     criterion,
                     device,
-                    n_bootstrap=args.metrics["n_bootstrap"],
+                    n_bootstrap=n_bootstrap,
                     seed=args.seed + fold_idx,
                     return_predictions=True,
                 )
@@ -242,16 +253,16 @@ def main(args):
                     f"Train Acc: {train_acc:.3f}"
                 )
        
-    if args.save_every > 0:
+    if save_every > 0:
         saved_full_prediction_files = []
-        for epoch in range(args.save_every, args.epochs + 1, args.save_every):
+        for epoch in range(save_every, args.epochs + 1, save_every):
             save_path = save_full_predictions_npz(output_dir, epoch)
             if save_path is not None:
                 saved_full_prediction_files.append(save_path)
 
         print(
             f"Exported {len(saved_full_prediction_files)} combined full-prediction "
-            f"file(s) for save_every={args.save_every}."
+            f"file(s) for save_every={save_every}."
         )
 
     # Evaluate the trained model by invoking the evaluation script directly
