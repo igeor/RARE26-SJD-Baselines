@@ -1,0 +1,37 @@
+data_path: "data"
+output_path: "output/finetune"
+experiment_name: "ViT-Base_GastroNet-5M_DINOv2"
+
+model: "vit_base_patch14_dinov2.lvd142m" # Options: "resnet50", "vit_b16", "vit_l16"
+pretrained: "resources/pretrained/ViT-Base_GastroNet-5M_DINOv2.pth"
+freeze_backbone: false
+
+head: 
+  hidden_dims: [256]
+  activation: "relu"
+  norm: null # Options: "batch", "layer", "none"
+  dropout: 0.1
+
+image_size: 336
+batch_size: 8
+epochs: 5
+save_every: 1
+lr: 0.001
+backbone_lr: 0.00001
+weight_decay: 0.01
+
+validate:
+  n_bootstrap: 3
+
+early_stopping:
+  enabled: false
+  patience: null # Not implemented yet
+  metric: "PPV@90% Recall" 
+
+k: 5 # Number of folds for K-Fold Cross-Validation
+sampling: "none" # Options: "none", "oversample", "undersample"
+
+log_file: "log.csv"
+save_model: "model.pth"
+num_workers: 0
+seed: 42
