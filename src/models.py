@@ -176,45 +176,71 @@ def get_classification_head(
     return nn.Sequential(*layers)
 
 
+class TimmClassifier(nn.Module):
+    def __init__(self, backbone: nn.Module, head: nn.Module):
+        super().__init__()
+        self.backbone = backbone
+        self.head = head
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(self.backbone(x))
+
+
 def build_model(args, device):
-    model = timm.create_model(
+    pretrained = getattr(args, "pretrained", None)
+    model_kwargs = {
+        "pretrained": pretrained is None,
+        "num_classes": 0,
+    }
+    if "vit" in args.model.lower():
+        model_kwargs["img_size"] = args.image_size
+
+    backbone = timm.create_model(
         args.model,
-        pretrained=True,
-        num_classes=1,
+        **model_kwargs,
     )
 
-    model = model.to(device)
+    backbone = backbone.to(device)
 
-    if args.pretrained:
-        print(f"Using pretrained weights from: {args.pretrained}")
-        pretrained_path = os.path.join(os.getcwd(), args.pretrained)
+    if pretrained:
+        print(f"Using pretrained weights from: {pretrained}")
+        pretrained_path = os.path.join(os.getcwd(), pretrained)
 
         if os.path.exists(pretrained_path):
             state_dict = torch.load(pretrained_path, map_location=device)
 
+            if isinstance(state_dict, dict) and "teacher" in state_dict:
+                state_dict = state_dict["teacher"]
+
             if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
                 state_dict = state_dict["model_state_dict"]
 
-            msg = model.load_state_dict(state_dict, strict=False)
+            backbone_state_dict = {
+                key.removeprefix("module.").removeprefix("backbone."): value
+                for key, value in state_dict.items()
+                if not key.removeprefix("module.").startswith("head.")
+            }
+
+            msg = backbone.load_state_dict(backbone_state_dict, strict=False)
             print(msg)
         else:
             raise FileNotFoundError(f"Pretrained checkpoint not found: {pretrained_path}")
 
     head = get_classification_head(
-        in_dim=model.num_features,
+        in_dim=backbone.num_features,
         hidden_dims=args.head["hidden_dims"],
         hidden_activation=args.head["activation"],
         norm=args.head["norm"],
         dropout=args.head["dropout"],
     )
 
-    model.fc = head
-    model = model.to(device)
+    model = TimmClassifier(backbone, head).to(device)
 
-    for param in model.parameters():
-        param.requires_grad = False
+    freeze_backbone = getattr(args, "freeze_backbone", True)
+    for param in model.backbone.parameters():
+        param.requires_grad = not freeze_backbone
 
-    for param in model.fc.parameters():
+    for param in model.head.parameters():
         param.requires_grad = True
 
     return model
