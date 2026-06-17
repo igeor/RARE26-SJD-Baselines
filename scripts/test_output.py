@@ -253,12 +253,18 @@ def main() -> None:
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    fake_input_batch = [
-        np.random.randint(0, 256, (args.image_size, args.image_size, 3), dtype=np.uint8)
-        for _ in range(2)
-    ]
+    # fake_input_batch = [
+    #     np.zeros((args.image_size, args.image_size, 3), dtype=np.uint8)
+    #     for _ in range(2)
+    # ]
+    
+    # Load the .tiff batch from data\test\sanity
+    test_images_dir = REPO_ROOT / "data" / "test" / "sanity"
+    import tifffile 
+    test_input_batch = tifffile.imread(test_images_dir / "example_batch_0_15.tiff")
+
     with torch.no_grad():
-        output = model.predict(fake_input_batch)
+        output = model.predict(test_input_batch)
     print(output)
 
     print(f"Loaded ensemble with {len(model.models)} model(s).")
