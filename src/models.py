@@ -2,13 +2,13 @@ import os
 
 import torch
 import timm
-import math
 from torch import nn
-from typing import List, Optional, Sequence
+from typing import List, Optional
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
 
-from utils.module import freeze_module, get_parent_module
+from utils.module import freeze_module
+from lora import apply_lora_to_linear_layers, get_lora_args
 
 class DINOStudentTeacherModel(nn.Module):
     def __init__(
@@ -71,56 +71,6 @@ class DINOHead(nn.Module):
         x = F.normalize(x, dim=-1, p=2)
         return self.last_layer(x)
         
-
-class LoRALinear(nn.Module):
-    """LoRA wrapper for nn.Linear: base(x) + scale * B(A(dropout(x)))."""
-
-    def __init__(self, base: nn.Linear, r: int = 8, alpha: int = 16, dropout: float = 0.05):
-        super().__init__()
-        if r <= 0:
-            raise ValueError("LoRA rank r must be > 0")
-
-        self.base = base
-        for p in self.base.parameters():
-            p.requires_grad = False
-
-        self.r = r
-        self.alpha = alpha
-        self.scaling = alpha / r
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.lora_A = nn.Linear(base.in_features, r, bias=False)
-        self.lora_B = nn.Linear(r, base.out_features, bias=False)
-
-        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
-        nn.init.zeros_(self.lora_B.weight)
-
-    def forward(self, x):
-        return self.base(x) + self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
-
-
-def apply_lora_to_linear_layers(
-    model: nn.Module,
-    target_keywords: Sequence[str],
-    r: int = 8,
-    alpha: int = 16,
-    dropout: float = 0.05,
-) -> List[str]:
-    targets = tuple(k.strip().lower() for k in target_keywords if k.strip())
-    if not targets:
-        raise ValueError("At least one --lora-target keyword is required")
-
-    to_replace: List[str] = []
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Linear) and any(k in name.lower() for k in targets):
-            to_replace.append(name)
-
-    for name in to_replace:
-        parent, child_name = get_parent_module(model, name)
-        old_linear = getattr(parent, child_name)
-        setattr(parent, child_name, LoRALinear(old_linear, r=r, alpha=alpha, dropout=dropout))
-
-    return to_replace
-
 
 class ClassificationHead(nn.Module):
     """Small supervised head used to monitor Domain Adaptation """
@@ -236,11 +186,31 @@ def build_model(args, device):
 
     model = TimmClassifier(backbone, head).to(device)
 
+    lora_args = get_lora_args(args)
     freeze_backbone = getattr(args, "freeze_backbone", True)
-    for param in model.backbone.parameters():
-        param.requires_grad = not freeze_backbone
+    if lora_args["enabled"]:
+        freeze_module(model.backbone)
+        lora_layers = apply_lora_to_linear_layers(
+            model.backbone,
+            target_keywords=lora_args["targets"],
+            r=lora_args["r"],
+            alpha=lora_args["alpha"],
+            dropout=lora_args["dropout"],
+        )
+        if len(lora_layers) == 0:
+            raise RuntimeError(
+                "No LoRA target layers found. For timm ViT/DINOv2 models, try targets: ['qkv']."
+            )
+        print(f"Enabled LoRA on {len(lora_layers)} layer(s): {', '.join(lora_layers[:5])}")
+    elif freeze_backbone:
+        freeze_module(model.backbone)
+    else:
+        for param in model.backbone.parameters():
+            param.requires_grad = True
 
     for param in model.head.parameters():
         param.requires_grad = True
+
+    model = model.to(device)
 
     return model
