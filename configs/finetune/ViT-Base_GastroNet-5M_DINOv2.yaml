@@ -6,6 +6,13 @@ model: "vit_base_patch14_dinov2.lvd142m" # Options: "resnet50", "vit_b16", "vit_
 pretrained: "resources/pretrained/ViT-Base_GastroNet-5M_DINOv2.pth"
 freeze_backbone: false
 
+lora:
+  enabled: false
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  targets: ["qkv"]
+
 head: 
   hidden_dims: [256]
   activation: "relu"
