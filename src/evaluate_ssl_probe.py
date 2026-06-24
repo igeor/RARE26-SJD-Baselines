@@ -1,72 +1,65 @@
-import math
 from pathlib import Path
 import numpy as np
-import pandas as pd
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from tqdm.asyncio import tqdm
-
-from metrics import compute_metrics
+from tqdm import tqdm
 
 from models import ClassificationHead
-from utils.io import save_val_metrics
+from evaluate_kfold import evaluate
+from utils.io import save_metrics_json, save_predictions_npz
 
 
-def bootstrap_evaluation(
-    y_true,
-    y_pred,
-    n_bootstrap=1000,
-    min_neoplasia=1000,
-    ndbe_multiplier=100,
-    output_dir=None,
-    prefix="bootstrap",
-):
-    y_true = np.asarray(y_true).reshape(-1)
-    y_pred = np.asarray(y_pred).reshape(-1)
+class SSLProbeModel(nn.Module):
+    def __init__(self, encoder: nn.Module, head: nn.Module):
+        super().__init__()
+        self.encoder = encoder
+        self.head = head
 
-    results = []
+    def forward(self, image):
+        features = self.encoder.extract_features(image)
+        return self.head(features)
 
-    neoplasia_indices = np.where(y_true == 1)[0]
-    ndbe_indices = np.where(y_true == 0)[0]
 
-    for _ in range(n_bootstrap):
-        neoplasia_sample = np.random.choice(
-            neoplasia_indices, size=min_neoplasia, replace=True
-        )
-        ndbe_sample = np.random.choice(
-            ndbe_indices, size=min_neoplasia * ndbe_multiplier, replace=True
-        )
+def get_n_bootstrap(args):
+    metrics = getattr(args, "metrics", None)
+    if metrics is not None:
+        return metrics.get("n_bootstrap", 1000)
 
-        sample_indices = np.concatenate([neoplasia_sample, ndbe_sample])
+    validate = getattr(args, "validate", None)
+    if validate is not None:
+        return validate.get("n_bootstrap", 1000)
 
-        metrics = compute_metrics(y_true[sample_indices], y_pred[sample_indices])
-        results.append(metrics)
+    return 1000
 
-    # Convert to DataFrame
-    metrics_df = pd.DataFrame(results)
 
-    # Compute median and 95% CI
-    summary_df = metrics_df.describe(percentiles=[0.025, 0.5, 0.975]).loc[
-        ["2.5%", "50%", "97.5%"]
-    ]
+def aggregate_fold_metrics(fold_metrics):
+    values_by_name = {}
 
-    # Save if requested
-    if output_dir:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+    def collect(prefix, value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                collect(f"{prefix}.{key}" if prefix else key, child)
+            return
 
-        metrics_df.to_csv(output_dir / f"{prefix}_bootstrap_raw.csv", index=False)
-        summary_df.to_csv(output_dir / f"{prefix}_bootstrap_summary.csv")
+        if value is None:
+            return
 
-        print(
-            f"Saved raw bootstrap metrics to: {output_dir / f'{prefix}_bootstrap_raw.csv'}"
-        )
-        print(
-            f"Saved summary statistics to: {output_dir / f'{prefix}_bootstrap_summary.csv'}"
-        )
+        try:
+            values_by_name.setdefault(prefix, []).append(float(value))
+        except (TypeError, ValueError):
+            return
 
-    return summary_df
+    for metrics in fold_metrics.values():
+        collect("", metrics)
+
+    return {
+        name: {
+            "mean": float(np.mean(values)),
+            "std": float(np.std(values)),
+        }
+        for name, values in values_by_name.items()
+    }
 
 
 def evaluate_ssl_model(
@@ -76,94 +69,86 @@ def evaluate_ssl_model(
     args,
     global_step: int = 0,
 ):
-    avg_val_metrics = {}
-
     probe_batch_size = getattr(args, "probe_batch_size", args.batch_size)
-    total_batches = 0
-
-    for train_subset, val_subset in folds:
-        total_batches += math.ceil(len(train_subset) / probe_batch_size)
-        total_batches += math.ceil(len(val_subset) / probe_batch_size)
+    probe_epochs = getattr(args, "probe_epochs", 1)
+    n_bootstrap = get_n_bootstrap(args)
+    fold_metrics = {}
 
     student.eval()
 
-    with tqdm(total=total_batches, desc="SSL probe eval", unit="batch") as pbar:
-        for fold_idx, (train_subset, val_subset) in enumerate(folds, start=1):
+    for fold_idx, (train_subset, val_subset) in enumerate(folds, start=1):
+        # Set a unique seed for the probe training to ensure reproducibility across folds.
+        probe_seed = getattr(args, "probe_seed", args.seed) + fold_idx
+        probe_generator = torch.Generator()
+        probe_generator.manual_seed(probe_seed)
 
-            # Set a unique seed for the probe training to ensure reproducibility across folds.
-            probe_seed = getattr(args, "probe_seed", args.seed) + fold_idx
-            probe_generator = torch.Generator()
-            probe_generator.manual_seed(probe_seed)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(probe_seed)
+            fc = ClassificationHead(in_dim=student.hidden_size).to(device)
 
-            with torch.random.fork_rng(devices=[]):
-                torch.manual_seed(probe_seed)
-                fc = ClassificationHead(in_dim=student.hidden_size).to(device)
+        fc_optimizer = torch.optim.AdamW(
+            fc.parameters(),
+            lr=getattr(args, "probe_lr", args.lr),
+            weight_decay=args.probe_weight_decay,
+        )
+        fc_criterion = nn.BCEWithLogitsLoss()
 
-            fc_optimizer = torch.optim.AdamW(
-                fc.parameters(),
-                lr=getattr(args, "probe_lr", args.lr),
-                weight_decay=args.probe_weight_decay,
-            )
-            fc_criterion = nn.BCEWithLogitsLoss()
+        fc_train_loader = DataLoader(
+            train_subset,
+            batch_size=probe_batch_size,
+            shuffle=True,
+            generator=probe_generator,
+        )
+        fc_val_loader = DataLoader(
+            val_subset,
+            batch_size=probe_batch_size,
+            shuffle=False,
+        )
 
-            fc_train_loader = DataLoader(
-                train_subset,
-                batch_size=probe_batch_size,
-                shuffle=True,
-                generator=probe_generator,
-            )
-            fc_val_loader = DataLoader(
-                val_subset,
-                batch_size=probe_batch_size,
-                shuffle=False,
-            )
-
+        for probe_epoch in range(1, probe_epochs + 1):
             fc.train()
-            for image, label in fc_train_loader:
-                image = image.to(device, non_blocking=True)
-                label = label.to(device, non_blocking=True).float().unsqueeze(1)
-
-                with torch.no_grad():
-                    features = student.extract_features(image)
-
-                fc_optimizer.zero_grad(set_to_none=True)
-                logits = fc(features)
-                loss = fc_criterion(logits, label)
-                loss.backward()
-                fc_optimizer.step()
-
-                pbar.update(1)
-                pbar.set_postfix(fold=fold_idx, phase="train")
-
-            fc.eval()
-            y_true, y_pred = [], []
-
-            with torch.no_grad():
-                for image, label in fc_val_loader:
+            with tqdm(
+                fc_train_loader,
+                desc=f"SSL probe fold {fold_idx} epoch {probe_epoch}/{probe_epochs}",
+                unit="batch",
+            ) as pbar:
+                for image, label in pbar:
                     image = image.to(device, non_blocking=True)
                     label = label.to(device, non_blocking=True).float().unsqueeze(1)
 
-                    features = student.extract_features(image)
+                    with torch.no_grad():
+                        features = student.extract_features(image)
+
+                    fc_optimizer.zero_grad(set_to_none=True)
                     logits = fc(features)
+                    loss = fc_criterion(logits, label)
+                    loss.backward()
+                    fc_optimizer.step()
 
-                    y_true.extend(label.cpu().numpy().ravel())
-                    y_pred.extend(torch.sigmoid(logits).cpu().numpy().ravel())
+                    pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-                    pbar.update(1)
-                    pbar.set_postfix(fold=fold_idx, phase="val")
+        probe_model = SSLProbeModel(student, fc).to(device)
+        metrics, y_val_true, y_val_scores = evaluate(
+            probe_model,
+            fc_val_loader,
+            fc_criterion,
+            device,
+            n_bootstrap=n_bootstrap,
+            seed=args.seed + fold_idx,
+            return_predictions=True,
+        )
+        fold_metrics[fold_idx] = metrics
 
-            metrics = compute_metrics(np.array(y_true), np.array(y_pred))
-            avg_val_metrics[fold_idx] = metrics
+        if getattr(args, "save_dir", None):
+            fold_dir = Path(args.save_dir) / f"ssl_probe_step_{global_step}" / f"fold_{fold_idx}"
+            save_metrics_json(
+                metrics,
+                fold_dir / "val_metrics.json",
+            )
+            save_predictions_npz(
+                y_val_true,
+                y_val_scores,
+                fold_dir / "val_predictions.npz",
+            )
 
-    aggregated_metrics = {}
-    for metric_name in avg_val_metrics[1].keys():
-        metric_values = [avg_val_metrics[fold][metric_name] for fold in avg_val_metrics]
-        aggregated_metrics[metric_name] = {
-            "mean": float(np.mean(metric_values)),
-            "std": float(np.std(metric_values)),
-        }
-
-    if getattr(args, "save_dir", None):
-        save_val_metrics(Path(args.save_dir), aggregated_metrics, global_step)
-
-    return aggregated_metrics
+    return aggregate_fold_metrics(fold_metrics)
