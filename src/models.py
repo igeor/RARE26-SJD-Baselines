@@ -138,6 +138,8 @@ class TimmClassifier(nn.Module):
 
 def build_model(args, device):
     pretrained = getattr(args, "pretrained", None)
+    lora_args = get_lora_args(args)
+    freeze_backbone = getattr(args, "freeze_backbone", True)
     model_kwargs = {
         "pretrained": pretrained is None,
         "num_classes": 0,
@@ -152,6 +154,8 @@ def build_model(args, device):
 
     backbone = backbone.to(device)
 
+    state_dict = None
+    checkpoint_has_lora = False
     if pretrained:
         print(f"Using pretrained weights from: {pretrained}")
         pretrained_path = os.path.join(os.getcwd(), pretrained)
@@ -162,19 +166,53 @@ def build_model(args, device):
             if isinstance(state_dict, dict) and "teacher" in state_dict:
                 state_dict = state_dict["teacher"]
 
+            if isinstance(state_dict, dict) and "model" in state_dict:
+                state_dict = state_dict["model"]
+
             if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
                 state_dict = state_dict["model_state_dict"]
 
-            backbone_state_dict = {
-                key.removeprefix("module.").removeprefix("backbone."): value
-                for key, value in state_dict.items()
-                if not key.removeprefix("module.").startswith("head.")
-            }
-
-            msg = backbone.load_state_dict(backbone_state_dict, strict=False)
-            print(msg)
+            checkpoint_has_lora = any(
+                ".lora_A." in key or ".lora_B." in key or ".base." in key
+                for key in state_dict.keys()
+            )
         else:
             raise FileNotFoundError(f"Pretrained checkpoint not found: {pretrained_path}")
+
+    lora_layers = []
+    should_attach_lora = lora_args["enabled"] or checkpoint_has_lora
+    if should_attach_lora:
+        freeze_module(backbone)
+        lora_layers = apply_lora_to_linear_layers(
+            backbone,
+            target_keywords=lora_args["targets"],
+            r=lora_args["r"],
+            alpha=lora_args["alpha"],
+            dropout=lora_args["dropout"],
+        )
+        if len(lora_layers) == 0:
+            raise RuntimeError(
+                "No LoRA target layers found. For timm ViT/DINO models, try targets: ['qkv']."
+            )
+        if lora_args["enabled"]:
+            print(f"Enabled LoRA on {len(lora_layers)} layer(s): {', '.join(lora_layers[:5])}")
+        else:
+            print(f"Attached frozen LoRA layers for checkpoint compatibility: {len(lora_layers)} layer(s)")
+    elif freeze_backbone:
+        freeze_module(backbone)
+    else:
+        for param in backbone.parameters():
+            param.requires_grad = True
+
+    if state_dict is not None:
+        backbone_state_dict = {
+            key.removeprefix("module.").removeprefix("backbone."): value
+            for key, value in state_dict.items()
+            if not key.removeprefix("module.").startswith("head.")
+        }
+
+        msg = backbone.load_state_dict(backbone_state_dict, strict=False)
+        print(msg)
 
     head = get_classification_head(
         in_dim=backbone.num_features,
@@ -186,28 +224,8 @@ def build_model(args, device):
 
     model = TimmClassifier(backbone, head).to(device)
 
-    lora_args = get_lora_args(args)
-    freeze_backbone = getattr(args, "freeze_backbone", True)
-    if lora_args["enabled"]:
+    if should_attach_lora and not lora_args["enabled"]:
         freeze_module(model.backbone)
-        lora_layers = apply_lora_to_linear_layers(
-            model.backbone,
-            target_keywords=lora_args["targets"],
-            r=lora_args["r"],
-            alpha=lora_args["alpha"],
-            dropout=lora_args["dropout"],
-        )
-        if len(lora_layers) == 0:
-            raise RuntimeError(
-                "No LoRA target layers found. For timm ViT/DINOv2 models, try targets: ['qkv']."
-            )
-        print(f"Enabled LoRA on {len(lora_layers)} layer(s): {', '.join(lora_layers[:5])}")
-    elif freeze_backbone:
-        freeze_module(model.backbone)
-    else:
-        for param in model.backbone.parameters():
-            param.requires_grad = True
-
     for param in model.head.parameters():
         param.requires_grad = True
 
