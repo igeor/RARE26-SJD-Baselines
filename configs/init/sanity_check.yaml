@@ -21,12 +21,14 @@ validate:
   n_bootstrap: 3
 
 early_stopping:
-  enabled: false
-  patience: null # Not implemented yet
+  enabled: true
+  every: 1
+  patience: 3
   metric: "PPV@90% Recall" 
 
 k: 5 # Number of folds for K-Fold Cross-Validation
 sampling: "none" # Options: "none", "oversample", "undersample"
+loss_pos_weight: null # Options: null, "auto", or a positive number such as 20.0
 
 log_file: "sanity_check_log.csv"
 save_model: "sanity_check_model.pth"
