@@ -15,7 +15,6 @@ head:
 image_size: 224
 batch_size: 64
 epochs: 5
-save_every: 1
 lr: 0.001
 backbone_lr: 0.00001
 weight_decay: 0.01
@@ -24,8 +23,9 @@ validate:
   n_bootstrap: 3
 
 early_stopping:
-  enabled: false
-  patience: null # Not implemented yet
+  enabled: true
+  every: 1
+  patience: 3
   metric: "PPV@90% Recall" 
 
 k: 5 # Number of folds for K-Fold Cross-Validation
