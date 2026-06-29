@@ -3,27 +3,24 @@ from collections import defaultdict
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler, Subset
 
+
+def _label_at(dataset, idx):
+    if isinstance(dataset, Subset):
+        return _label_at(dataset.dataset, dataset.indices[idx])
+
+    _, label = dataset.samples[idx]
+    return 1 if label == "neoplasia" else 0
+
+
 def create_dataloaders(train_dataset, test_dataset, args):
     if args.sampling == "oversample":
         print("Using WeightedRandomSampler for oversampling.")
-        class_counts = [
-            train_dataset.dataset.class_counts["nondysplastic"],
-            train_dataset.dataset.class_counts["neoplasia"],
-        ]
-        class_weights = 1.0 / torch.tensor(class_counts, dtype=torch.float)
-
-        # Get the original indices used in the split
-        train_indices = (
-            train_dataset.indices
-            if isinstance(train_dataset, Subset)
-            else range(len(train_dataset))
-        )
+        labels = [_label_at(train_dataset, idx) for idx in range(len(train_dataset))]
+        class_counts = torch.bincount(torch.tensor(labels), minlength=2).float()
+        class_weights = 1.0 / class_counts
 
         # Create weights based on label
-        sample_weights = []
-        for idx in train_indices:
-            _, label = train_dataset.dataset[idx]
-            sample_weights.append(class_weights[label])
+        sample_weights = [class_weights[label] for label in labels]
 
         sampler = WeightedRandomSampler(
             weights=sample_weights, num_samples=len(sample_weights), replacement=True
@@ -39,9 +36,9 @@ def create_dataloaders(train_dataset, test_dataset, args):
         print("Using subset undersampling.")
         label_to_indices = defaultdict(list)
 
-        # Work with original dataset
+        # Work with dataset metadata without opening or transforming images.
         for i in range(len(train_dataset)):
-            _, label = train_dataset[i]
+            label = _label_at(train_dataset, i)
             label_to_indices[label].append(i)
 
         min_count = min(len(label_to_indices[0]), len(label_to_indices[1]))

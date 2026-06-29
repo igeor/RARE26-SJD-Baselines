@@ -106,6 +106,97 @@ def save_predictions_npz(y_true, y_scores, path):
     )
 
 
+def save_full_predictions_npz(output_dir, epoch):
+    """Combine validation predictions from all folds for one epoch."""
+    output_dir = Path(output_dir)
+
+    prediction_files = sorted(
+        output_dir.glob(f"fold_*/epoch_{epoch}_val_predictions.npz")
+    )
+
+    if not prediction_files:
+        print(f"No prediction files found for epoch {epoch}")
+        return None
+
+    all_y_true = []
+    all_y_scores = []
+    fold_ids = []
+
+    for path in prediction_files:
+        data = np.load(path)
+
+        all_y_true.append(data["y_true"])
+        all_y_scores.append(data["y_scores"])
+
+        fold_name = path.parent.name  # e.g. fold_1
+        fold_idx = int(fold_name.split("_")[1])
+        fold_ids.append(
+            np.full(shape=data["y_true"].shape, fill_value=fold_idx)
+        )
+
+    y_true = np.concatenate(all_y_true)
+    y_scores = np.concatenate(all_y_scores)
+    folds = np.concatenate(fold_ids)
+
+    save_path = output_dir / f"epoch_{epoch}_full_predictions.npz"
+
+    np.savez_compressed(
+        save_path,
+        y_true=y_true,
+        y_scores=y_scores,
+        folds=folds,
+    )
+
+    print(f"Saved combined predictions to: {save_path}")
+    return save_path
+
+
+def save_best_full_predictions_npz(output_dir, best_epochs_by_fold):
+    """Combine validation predictions from each fold's best epoch."""
+    output_dir = Path(output_dir)
+
+    all_y_true = []
+    all_y_scores = []
+    fold_ids = []
+    source_files = []
+
+    for fold_idx in sorted(best_epochs_by_fold):
+        epoch = best_epochs_by_fold[fold_idx]
+        path = output_dir / f"fold_{fold_idx}" / f"epoch_{epoch}_val_predictions.npz"
+
+        if not path.exists():
+            print(f"Missing best prediction file for fold {fold_idx}: {path}")
+            return None
+
+        data = np.load(path)
+        all_y_true.append(data["y_true"])
+        all_y_scores.append(data["y_scores"])
+        fold_ids.append(
+            np.full(shape=data["y_true"].shape, fill_value=fold_idx)
+        )
+        source_files.append(str(path))
+
+    y_true = np.concatenate(all_y_true)
+    y_scores = np.concatenate(all_y_scores)
+    folds = np.concatenate(fold_ids)
+
+    save_path = output_dir / "best_full_predictions.npz"
+
+    np.savez_compressed(
+        save_path,
+        y_true=y_true,
+        y_scores=y_scores,
+        folds=folds,
+        best_epochs_by_fold=np.array(
+            [best_epochs_by_fold[fold_idx] for fold_idx in sorted(best_epochs_by_fold)]
+        ),
+        source_files=np.array(source_files),
+    )
+
+    print(f"Saved best combined predictions to: {save_path}")
+    return save_path
+
+
 def flatten_metrics(metrics):
     flat = {}
 
