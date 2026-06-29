@@ -112,11 +112,56 @@ def load_prediction_ensemble(predictions_dirs, epochs):
     return y_true_reference, y_scores_ensemble, folds_reference, loaded_paths
 
 
-def save_results(output_dir, epochs, y_true, y_scores, folds, metrics, input_paths):
+def load_best_prediction_ensemble(predictions_dirs):
+    y_true_reference = None
+    folds_reference = None
+    score_sets = []
+    loaded_paths = []
+
+    for predictions_dir in predictions_dirs:
+        predictions_dir = Path(predictions_dir)
+        if not predictions_dir.exists():
+            raise FileNotFoundError(f"Directory {predictions_dir} does not exist.")
+
+        file_path = predictions_dir / "best_full_predictions.npz"
+        if not file_path.exists():
+            raise FileNotFoundError(f"Prediction file {file_path} does not exist.")
+
+        y_true, y_scores, folds = load_npz_file(file_path)
+        y_true = np.asarray(y_true).reshape(-1).astype(int)
+        y_scores = np.asarray(y_scores).reshape(-1).astype(float)
+        folds = None if folds is None else np.asarray(folds).reshape(-1)
+
+        if y_true_reference is None:
+            y_true_reference = y_true
+            folds_reference = folds
+        else:
+            if y_true.shape != y_true_reference.shape or not np.array_equal(
+                y_true, y_true_reference
+            ):
+                raise ValueError(
+                    f"Labels/order in {file_path} do not match the first input."
+                )
+            if folds_reference is not None and folds is not None:
+                if folds.shape != folds_reference.shape or not np.array_equal(
+                    folds, folds_reference
+                ):
+                    raise ValueError(
+                        f"Fold ids in {file_path} do not match the first input."
+                    )
+
+        score_sets.append(y_scores)
+        loaded_paths.append(file_path)
+
+    y_scores_ensemble = np.mean(np.stack(score_sets, axis=0), axis=0)
+    return y_true_reference, y_scores_ensemble, folds_reference, loaded_paths
+
+
+def save_results(output_dir, epochs, y_true, y_scores, folds, metrics, input_paths, eval_model):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    epoch_label = format_epoch_label(epochs)
+    epoch_label = "best" if eval_model == "best" else format_epoch_label(epochs)
     predictions_path = output_dir / f"{epoch_label}_ensemble_predictions.npz"
     if folds is None:
         np.savez_compressed(predictions_path, y_true=y_true, y_scores=y_scores)
@@ -130,6 +175,7 @@ def save_results(output_dir, epochs, y_true, y_scores, folds, metrics, input_pat
 
     metrics_payload = {
         "epochs": epochs,
+        "eval_model": eval_model,
         "input_prediction_files": [str(path) for path in input_paths],
         "metrics": metrics,
     }
@@ -194,11 +240,17 @@ if __name__ == "__main__":
             yaml.safe_load(f)
 
     try:
-        epochs = validate_epochs(predictions_dirs, args.epoch)
-        y_true, y_scores, folds, input_paths = load_prediction_ensemble(
-            predictions_dirs,
-            epochs,
-        )
+        if args.eval_model == "best":
+            epochs = args.epoch
+            y_true, y_scores, folds, input_paths = load_best_prediction_ensemble(
+                predictions_dirs,
+            )
+        else:
+            epochs = validate_epochs(predictions_dirs, args.epoch)
+            y_true, y_scores, folds, input_paths = load_prediction_ensemble(
+                predictions_dirs,
+                epochs,
+            )
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}")
         sys.exit(1)
@@ -237,4 +289,5 @@ if __name__ == "__main__":
         folds=folds,
         metrics=metrics,
         input_paths=input_paths,
+        eval_model=args.eval_model,
     )
