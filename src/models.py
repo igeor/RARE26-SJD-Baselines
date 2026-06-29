@@ -136,6 +136,78 @@ class TimmClassifier(nn.Module):
         return self.head(self.backbone(x))
 
 
+class TimmSegmentorClassifier(nn.Module):
+    def __init__(self, backbone: nn.Module, head: nn.Module, decoder: nn.Module):
+        super().__init__()
+        self.backbone = backbone
+        self.head = head
+        self.decoder = decoder
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(self.backbone(x))
+
+
+def _strip_checkpoint_prefix(key: str) -> str:
+    for prefix in ("module.", "backbone."):
+        key = key.removeprefix(prefix)
+    return key
+
+
+def _prepare_backbone_state_dict(
+    state_dict,
+    backbone: nn.Module,
+    has_lora_wrappers: bool,
+):
+    backbone_keys = backbone.state_dict()
+    backbone_state_dict = {}
+    skipped_keys = []
+
+    for raw_key, value in state_dict.items():
+        key = _strip_checkpoint_prefix(raw_key)
+        if key.startswith("head.") or key.startswith("dino_head."):
+            skipped_keys.append(key)
+            continue
+
+        candidate_keys = [key]
+        if has_lora_wrappers and ".base." not in key:
+            for suffix in (".weight", ".bias"):
+                if key.endswith(suffix):
+                    candidate_keys.append(key[: -len(suffix)] + ".base" + suffix)
+                    break
+
+        loaded = False
+        for candidate_key in candidate_keys:
+            expected = backbone_keys.get(candidate_key)
+            if expected is not None and expected.shape == value.shape:
+                backbone_state_dict[candidate_key] = value
+                loaded = True
+                break
+
+        if not loaded:
+            skipped_keys.append(key)
+
+    return backbone_state_dict, skipped_keys
+
+
+def _print_load_summary(load_msg, loaded_count: int, skipped_keys) -> None:
+    missing_keys = list(load_msg.missing_keys)
+    unexpected_keys = list(load_msg.unexpected_keys)
+    expected_lora_missing = [
+        key for key in missing_keys if ".lora_A." in key or ".lora_B." in key
+    ]
+    other_missing = [key for key in missing_keys if key not in expected_lora_missing]
+
+    print(f"Loaded {loaded_count} pretrained backbone tensor(s).")
+    if expected_lora_missing:
+        print(f"Initialized {len(expected_lora_missing)} new LoRA adapter tensor(s).")
+    if other_missing:
+        print(f"Missing non-LoRA backbone key(s): {other_missing[:10]}")
+    if unexpected_keys:
+        print(f"Unexpected checkpoint key(s): {unexpected_keys[:10]}")
+    if skipped_keys:
+        print(f"Skipped {len(skipped_keys)} checkpoint key(s) not used by this backbone: {skipped_keys[:10]}")
+
+
 def build_model(args, device):
     pretrained = getattr(args, "pretrained", None)
     lora_args = get_lora_args(args)
@@ -205,14 +277,13 @@ def build_model(args, device):
             param.requires_grad = True
 
     if state_dict is not None:
-        backbone_state_dict = {
-            key.removeprefix("module.").removeprefix("backbone."): value
-            for key, value in state_dict.items()
-            if not key.removeprefix("module.").startswith("head.")
-        }
-
+        backbone_state_dict, skipped_keys = _prepare_backbone_state_dict(
+            state_dict,
+            backbone,
+            has_lora_wrappers=should_attach_lora,
+        )
         msg = backbone.load_state_dict(backbone_state_dict, strict=False)
-        print(msg)
+        _print_load_summary(msg, len(backbone_state_dict), skipped_keys)
 
     head = get_classification_head(
         in_dim=backbone.num_features,
